@@ -1,4 +1,4 @@
-[![CI](https://github.com/CSE416-Project/CampusReserve/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
+[![CI](https://github.com/CSE416-Project/CampusReserve/actions/workflows/ci.yml/badge.svg)](https://github.com/CSE416-Project/CampusReserve/actions/workflows/ci.yml)
 
 # Introduction
 
