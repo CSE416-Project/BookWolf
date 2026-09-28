@@ -6,9 +6,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from ..main import app
-from ..database import get_db
-from ..models.base import Base
+from main import app
+from database import get_db
+from models.base import Base
 
 
 # --- Test database: in-memory SQLite, fresh per test session ---
