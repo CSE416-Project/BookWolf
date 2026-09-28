@@ -11,7 +11,7 @@ from sqlalchemy.pool import StaticPool
 
 from models.base import Base
 from models.room import Room
-from models.request import Request, RequestStatus
+from models.room import Request, RequestStatus
 from services import booking
 
 
