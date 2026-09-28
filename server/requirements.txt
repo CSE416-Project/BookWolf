@@ -1,0 +1,18 @@
+# Web framework
+fastapi
+uvicorn[standard]
+
+# Database
+sqlalchemy
+psycopg[binary]
+
+# Auth
+python-jose[cryptography]
+passlib[bcrypt]
+
+# Config
+python-dotenv
+
+# Dev / CI
+pytest
+ruff
