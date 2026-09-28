@@ -20,8 +20,8 @@ sections below cover what's runnable now.
 ### Clone the repository
 
 ```bash
-git clone https://github.com/OWNER/REPO.git
-cd REPO
+git clone https://github.com/CSE416-Project/CampusReserve.git
+cd CampusReserve
 ```
 
 ### Backend (`server/`)
