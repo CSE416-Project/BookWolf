@@ -5,9 +5,9 @@ from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 
-from ..database import get_db
-from ..models.user import User, UserRole
-from ..authentication import (
+from database import get_db
+from models.user import User, UserRole
+from authentication import (
     authenticate_user,
     create_access_token,
     hash_password,
