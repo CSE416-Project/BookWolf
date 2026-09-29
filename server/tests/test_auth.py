@@ -9,14 +9,15 @@ from sqlalchemy.pool import StaticPool
 from main import app
 from database import get_db
 from models.base import Base
+import os
 
 
 # --- Test database: in-memory SQLite, fresh per test session ---
-engine = create_engine(
-    "sqlite:///:memory:",
-    connect_args={"check_same_thread": False},
-    poolclass=StaticPool,  # keeps the same in-memory DB across connections
+TEST_DATABASE_URL = os.environ.get(
+    "TEST_DATABASE_URL",
+    "postgresql+psycopg://postgres:postgres@localhost:5432/campusreserve_test",
 )
+engine = create_engine(TEST_DATABASE_URL)
 TestingSessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 

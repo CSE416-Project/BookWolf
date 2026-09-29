@@ -13,14 +13,14 @@ from models.base import Base
 from models.room import Room
 from models.room import Request, RequestStatus
 from services import booking
-
+import os
 
 # --- Fresh in-memory DB per test ---
-engine = create_engine(
-    "sqlite:///:memory:",
-    connect_args={"check_same_thread": False},
-    poolclass=StaticPool,
+TEST_DATABASE_URL = os.environ.get(
+    "TEST_DATABASE_URL",
+    "postgresql+psycopg://postgres:postgres@localhost:5432/campusreserve_test",
 )
+engine = create_engine(TEST_DATABASE_URL)
 TestingSessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
