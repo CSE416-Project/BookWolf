@@ -51,9 +51,11 @@ def test_push_conflicts_with_registrar(mock):
         run(mock.push_booking(ExternalBooking(ROOM, at(5, 10, 30), at(5, 12), "Club")))
 
 
-def test_back_to_back_is_not_a_conflict(mock): 
-    # At the moment, back to back booking is allowed. May need to add time in between for clean up/set up
+
+# At the moment, back to back booking is allowed. May need to add time in between for clean up/set up
+def test_back_to_back_is_not_a_conflict(mock):
     run(mock.push_booking(ExternalBooking(ROOM, at(5, 11, 20), at(5, 12), "Club")))
+
 
 
 def test_forced_failure_then_recovery(mock):
