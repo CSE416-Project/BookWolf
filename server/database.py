@@ -9,12 +9,13 @@ import os
 # since only your test config set that variable.
 from dotenv import load_dotenv
 
-load_dotenv()
-
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from models.base import Base  # noqa: F401 — imported so metadata is populated
+
+load_dotenv()
+
 
 # Connection string from the environment; falls back to a local default for dev.
 DATABASE_URL = os.environ.get(
