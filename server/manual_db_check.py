@@ -26,11 +26,11 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
-load_dotenv()
-
 # This script lives in `server/`, and your models package is `server/models/`,
 # so the import is just `models` (not `app.models`).
 from models import Base, Organization, Venue, Room, Request, RequestStatus
+
+load_dotenv()
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 engine = create_engine(DATABASE_URL, echo=False)

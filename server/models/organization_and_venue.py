@@ -8,7 +8,6 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
-    Integer,
     String,
     Table,
     Text,
