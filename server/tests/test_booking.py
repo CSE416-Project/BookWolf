@@ -4,6 +4,7 @@ overlap check that prevents double-booking."""
 from datetime import datetime, timedelta
 
 import pytest
+import uuid
 from fastapi import HTTPException
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
@@ -37,10 +38,13 @@ def db():
         session.close()
         Base.metadata.drop_all(bind=engine)
 
+VENUE_ID = uuid.uuid4()
+ORG_ID = uuid.uuid4()
+USER_ID = uuid.uuid4()
 
 @pytest.fixture
 def room(db):
-    r = Room(name="Test Room", venue_id="venue-1")
+    r = Room(name="Test Room", venue_id=VENUE_ID)
     db.add(r)
     db.commit()
     db.refresh(r)
