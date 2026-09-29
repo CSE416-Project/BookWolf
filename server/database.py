@@ -3,7 +3,7 @@
 import os
 
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import sessionmaker
 
 from models.base import Base  # noqa: F401 — imported so metadata is populated
 
