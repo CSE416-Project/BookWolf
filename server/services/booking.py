@@ -9,7 +9,7 @@ from datetime import datetime
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
-from models.request import Request, RequestStatus
+from models.room import Request, RequestStatus
 from models.room import Room
 
 

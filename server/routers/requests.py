@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models.request import Request
+from models.room import Request
 from models.user import User
 from authentication import get_current_user
 from services import booking
