@@ -10,6 +10,7 @@ psycopg[binary]
 python-jose[cryptography]
 passlib[bcrypt]
 pydantic[email]
+python-multipart
 
 # Config
 python-dotenv
