@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -26,6 +26,9 @@ TestingSessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=Fals
 
 @pytest.fixture
 def db():
+    with engine.connect() as conn:
+        conn.execute(text("CREATE EXTENSION IF NOT EXISTS btree_gist"))
+        conn.commit()  
     Base.metadata.create_all(bind=engine)
     session = TestingSessionLocal()
     try:

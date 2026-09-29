@@ -2,7 +2,7 @@
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -24,6 +24,10 @@ TestingSessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=Fals
 @pytest.fixture
 def client():
     """A test client backed by a fresh in-memory database."""
+    
+    with engine.connect() as conn:
+        conn.execute(text("CREATE EXTENSION IF NOT EXISTS btree_gist"))
+        conn.commit()
     Base.metadata.create_all(bind=engine)
 
     def override_get_db():
