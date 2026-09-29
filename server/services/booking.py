@@ -13,29 +13,16 @@ from models.room import Request, RequestStatus
 from models.room import Room
 
 
-def submit_request(
-    db: Session,
-    *,
-    room_id: str,
-    organization_id: str,
-    requester_id: str,
-    start_time: datetime,
-    end_time: datetime,
-) -> Request:
-    """Validate and create a new booking request in PENDING status."""
+def submit_request(db, *, room_id, organization_id, requester_id,
+                   event_name, start_time, end_time):
     if end_time <= start_time:
         raise HTTPException(status_code=400, detail="End time must be after start time.")
-
     room = db.query(Room).filter(Room.id == room_id).first()
     if room is None:
         raise HTTPException(status_code=404, detail="Room not found.")
-
     req = Request(
-        room_id=room_id,
-        organization_id=organization_id,
-        requester_id=requester_id,
-        start_time=start_time,
-        end_time=end_time,
+        room_id=room_id, organization_id=organization_id, requester_id=requester_id,
+        event_name=event_name, start_time=start_time, end_time=end_time,
         status=RequestStatus.PENDING,
     )
     db.add(req)

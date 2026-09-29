@@ -56,7 +56,6 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
         name=payload.name,
         password_hash=hash_password(payload.password),
         role=UserRole.CLUB_LEADER,
-        is_verified=False,
     )
     db.add(user)
     db.commit()
