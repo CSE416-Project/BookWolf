@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from .routers import auth, rooms, requests
+from routers import auth, rooms, requests
 
 app = FastAPI(title="CampusReserve")
 
