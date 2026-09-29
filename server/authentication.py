@@ -10,10 +10,10 @@ from passlib.context import CryptContext
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
-from .database import get_db
-from .models.user import User
-from .auth.scopes import SCOPES
-from .auth.roles import ROLES
+from database import get_db
+from models.user import User
+from access_control.scopes import SCOPES
+from access_control.roles import ROLES
 
 SECRET_KEY = os.environ["JWT_SECRET_KEY"]
 ALGORITHM = "HS256"
