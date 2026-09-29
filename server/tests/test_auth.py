@@ -24,7 +24,7 @@ TestingSessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=Fals
 @pytest.fixture
 def client():
     """A test client backed by a fresh in-memory database."""
-    
+
     with engine.connect() as conn:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS btree_gist"))
         conn.commit()
