@@ -13,6 +13,7 @@ Conventions:
 from __future__ import annotations
 
 import datetime as dt
+import re
 from collections import defaultdict
 from zoneinfo import ZoneInfo
 
@@ -91,6 +92,67 @@ def merge_rooms(
         room["waitlist_count"] = waitlist_counts.get(room["id"], 0)
 
     return sorted(merged.values(), key=lambda r: r["name"])
+
+
+# ---------------------------------------------------------------- time input
+
+_TIME_12H = re.compile(r"^\s*(\d{1,2})(?::(\d{2}))?\s*([ap])\.?\s*m?\.?\s*$", re.IGNORECASE)
+
+
+def parse_time_12h(text: str) -> dt.time:
+    """Parse a 12-hour clock time: "6 PM", "6:00 PM", "6:30pm", "11:15 a.m.".
+
+    Raises ValueError with a readable message if it doesn't parse.
+    """
+    m = _TIME_12H.match(text or "")
+    if not m:
+        raise ValueError(f'"{text}" isn\'t a time like "6:00 PM".')
+    hour, minute, ampm = int(m.group(1)), int(m.group(2) or 0), m.group(3).lower()
+    if not 1 <= hour <= 12 or not 0 <= minute <= 59:
+        raise ValueError(f'"{text}" isn\'t a valid time; the hour must be 1-12 '
+                         f'and minutes 00-59.')
+    if ampm == "a":
+        hour = 0 if hour == 12 else hour       # 12 AM is midnight
+    else:
+        hour = 12 if hour == 12 else hour + 12  # 12 PM is noon
+    return dt.time(hour, minute)
+
+
+def window_from_parts(year: int, month: int, day: int,
+                      start_time: str, end_time: str) -> tuple[dt.datetime, dt.datetime]:
+    """Build [start, end) from a date and two 12-hour times.
+
+    If the end time is at or before the start time, the window runs past
+    midnight into the next day (e.g. 10:00 PM to 1:00 AM).
+    """
+    date = dt.date(year, month, day)  # ValueError for e.g. Feb 30
+    start = dt.datetime.combine(date, parse_time_12h(start_time))
+    end = dt.datetime.combine(date, parse_time_12h(end_time))
+    if end <= start:
+        end += dt.timedelta(days=1)
+    return start, end
+
+
+# ---------------------------------------------------------------- availability
+
+def is_free_in_25live(bookings: list[dict], start: dt.datetime, end: dt.datetime) -> bool:
+    """True if no 25Live event or closed period overlaps [start, end).
+
+    Uses booked times (including setup/teardown), and counts tentative events
+    as taken, since they're likely to be confirmed.
+    """
+    for b in bookings:
+        if b["kind"] == "event" and b["state"] in ("Cancelled", "Deleted"):
+            continue
+        if overlaps(start, end, b["start"], b["end"]):
+            return False
+    return True
+
+
+def booking_window_open(room: dict, start: dt.datetime, now: dt.datetime) -> bool:
+    """False if `start` is further ahead than the room allows booking."""
+    days = room.get("booking_opens_days_ahead")
+    return days is None or start <= now + dt.timedelta(days=days)
 
 
 # ---------------------------------------------------------------- schedule

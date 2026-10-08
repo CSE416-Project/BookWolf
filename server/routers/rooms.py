@@ -12,9 +12,12 @@ Room.external_ref. Rooms that exist only in our database use their UUID.
 
 import asyncio
 import datetime as dt
+import inspect
+import logging
 import uuid
+from typing import Any, Callable, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
@@ -24,8 +27,19 @@ from authentication import get_current_user
 from database import get_db
 from models.room import Request, RequestStatus, Room, RoomClosure, SyncStatus
 from models.user import User
-from services import live25
-from services.room_merge import build_schedule, campus_now, merge_rooms, to_local_naive
+from services import live25, room_features
+from services.room_features import RoomFilters
+from services.room_merge import (
+    booking_window_open,
+    build_schedule,
+    campus_now,
+    is_free_in_25live,
+    merge_rooms,
+    to_local_naive,
+    window_from_parts,
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/rooms", tags=["rooms"])
 
@@ -51,6 +65,43 @@ class RoomResponse(BaseModel):
     source: str                    # "25live", "campusreserve", or "both"
     pending_requests: int = 0
     waitlist_count: int = 0
+
+
+class AvailableRoomResponse(RoomResponse):
+    # Pending CampusReserve requests for this window. They don't block the
+    # room, but tell the user they may be competing for it.
+    overlapping_pending_requests: int = 0
+
+
+class Live25Feature(BaseModel):
+    id: int | None = None
+    name: str | None = None        # None until listed in data/live25_lookups.json
+    quantity: int | None = None
+
+
+class OpeningHours(BaseModel):
+    day: str | None = None
+    open: str | None = None
+    close: str | None = None
+
+
+class RoomDetailResponse(BaseModel):
+    id: str
+    name: str | None = None
+    short_name: str | None = None
+    capacity: int | None = None
+    building: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    features: list[Live25Feature] = []
+    categories: list[Live25Feature] = []
+    comments: str | None = None        # room notes from 25Live
+    instructions: str | None = None    # setup rules, e.g. "reset the furniture"
+    hours: list[OpeningHours] = []
+    layout_capacity: int | None = None
+    layout_photo_id: int | None = None
+    layout_diagram_id: int | None = None
+    tags: list[str] = []               # our feature tags derived from the above
 
 
 class ScheduleItem(BaseModel):
@@ -178,6 +229,51 @@ def _schedule_data(db: Session, public_id: str, start: dt.datetime, end: dt.date
     return room, requests, waitlisted, closure_dicts
 
 
+def _availability_db_data(db: Session, start: dt.datetime, end: dt.datetime):
+    """What our DB says about every room for [start, end).
+
+    Returns (blocked, pending_counts), keyed by public room id:
+      blocked:        rooms with an approved-but-not-yet-in-25Live request or a
+                      closure overlapping the window
+      pending_counts: number of pending requests overlapping the window
+    """
+    blocked: set[str] = set()
+
+    request_rows = (
+        db.query(Room.external_ref, Room.id, Request.status, Request.sync_status)
+        .join(Request, Request.room_id == Room.id)
+        .filter(func.coalesce(Request.setup_start, Request.start_time) < end,
+                func.coalesce(Request.cleanup_end, Request.end_time) > start,
+                Request.status.in_([RequestStatus.PENDING, RequestStatus.APPROVED]))
+        .all()
+    )
+    pending_counts: dict[str, int] = {}
+    for ref, rid, req_status, sync in request_rows:
+        pid = _public_id(ref, rid)
+        if req_status == RequestStatus.APPROVED and sync != SyncStatus.SYNCED:
+            # Approved here but 25Live doesn't know yet, so 25Live still shows it free.
+            blocked.add(pid)
+        elif req_status == RequestStatus.PENDING:
+            pending_counts[pid] = pending_counts.get(pid, 0) + 1
+
+    closures = (
+        db.query(RoomClosure)
+        .filter(RoomClosure.closed_from < end, RoomClosure.closed_until > start)
+        .all()
+    )
+    closed_room_ids = {c.room_id for c in closures if c.room_id}
+    closed_venue_ids = {c.venue_id for c in closures if c.venue_id}
+    if closed_room_ids or closed_venue_ids:
+        for ref, rid in (
+            db.query(Room.external_ref, Room.id)
+            .filter(or_(Room.id.in_(closed_room_ids), Room.venue_id.in_(closed_venue_ids)))
+            .all()
+        ):
+            blocked.add(_public_id(ref, rid))
+
+    return blocked, pending_counts
+
+
 # =============================================================================
 # Routes
 # =============================================================================
@@ -199,17 +295,8 @@ async def _merged_rooms(db: Session) -> list[dict]:
     return merge_rooms(live_rooms, db_rooms, pending, waitlist)
 
 
-@router.get("", response_model=list[RoomResponse])
-async def list_rooms(
-    building: str | None = None,
-    min_capacity: int | None = None,
-    club_bookable_only: bool = False,
-    include_inactive: bool = False,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """List rooms, optionally filtered by building, minimum capacity, or bookability."""
-    rooms = await _merged_rooms(db)
+def _filter_rooms(rooms: list[dict], building: str | None, min_capacity: int | None,
+                  club_bookable_only: bool, include_inactive: bool) -> list[dict]:
     if not include_inactive:
         rooms = [r for r in rooms if r["is_active"]]
     if club_bookable_only:
@@ -220,7 +307,241 @@ async def list_rooms(
                  if b in (r.get("building") or "").lower() or r.get("venue_id") == building]
     if min_capacity is not None:
         rooms = [r for r in rooms if (r.get("capacity") or 0) >= min_capacity]
+    return rooms
+
+
+@router.get("", response_model=list[RoomResponse])
+async def list_rooms(
+    building: str | None = None,
+    min_capacity: int | None = None,
+    club_bookable_only: bool = False,
+    include_inactive: bool = False,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List rooms, optionally filtered by building, minimum capacity, or bookability."""
+    rooms = _filter_rooms(await _merged_rooms(db), building, min_capacity,
+                          club_bookable_only, include_inactive)
     return [RoomResponse(**r) for r in rooms]
+
+
+def _parse_window(year: int, month: int, day: int,
+                  start_time: str, end_time: str) -> tuple[dt.datetime, dt.datetime]:
+    try:
+        start, end = window_from_parts(year, month, day, start_time, end_time)
+    except ValueError as e:
+        msg = str(e) if '"' in str(e) else f"{month}/{day}/{year} isn't a valid date."
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg)
+    if end <= campus_now():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="That time has already passed.")
+    return start, end
+
+
+async def _available_rooms(db: Session, start: dt.datetime, end: dt.datetime,
+                           pick: Callable[[list[dict]], Any]) -> list[dict]:
+    """Rooms chosen by `pick` (sync or async) that are free for [start, end).
+
+    Shared by /available and /search so both use the same availability rules.
+    """
+    now = campus_now()
+    (all_rooms, (blocked, pending_counts)) = await asyncio.gather(
+        _merged_rooms(db),
+        run_in_threadpool(_availability_db_data, db, start, end),
+    )
+    picked = pick(all_rooms)
+    if inspect.isawaitable(picked):
+        picked = await picked
+    candidates = [r for r in picked
+                  if r["id"] not in blocked and booking_window_open(r, start, now)]
+
+    # Check every candidate's 25Live bookings. With the background refresh
+    # running (live25.run_refresh_loop), dates in the next month come from
+    # the cache; otherwise this fetches them, a few at a time.
+    live_ids = [r["id"] for r in candidates if r["id"].isdigit()]
+    last_day = (end - dt.timedelta(microseconds=1)).date()
+
+    async def free_in_25live(space_id: str) -> bool | None:
+        try:
+            bookings = await live25.get_bookings(space_id, start.date(), last_day)
+        except live25.Live25Error as e:
+            logger.warning("Availability check failed for room %s: %s", space_id, e)
+            return None
+        return is_free_in_25live(bookings, start, end)
+
+    results = dict(zip(live_ids, await asyncio.gather(*(free_in_25live(i) for i in live_ids))))
+    if live_ids and all(v is None for v in results.values()):
+        raise _upstream_error(live25.Live25Error("every availability check failed"))
+
+    available = []
+    for r in candidates:
+        # Rooms only in our DB have no 25Live schedule; our own data decides.
+        if r["id"] in results and results[r["id"]] is not True:
+            continue  # booked in 25Live, or we couldn't check it
+        available.append({**r, "overlapping_pending_requests": pending_counts.get(r["id"], 0)})
+    return available
+
+
+# Must be declared before "/{room_id}", or FastAPI would treat "available"
+# as a room id.
+@router.get("/available", response_model=list[AvailableRoomResponse])
+async def list_available_rooms(
+    year: int = Query(..., ge=2000, le=2100, examples=[2026]),
+    month: int = Query(..., ge=1, le=12, examples=[10]),
+    day: int = Query(..., ge=1, le=31, examples=[9]),
+    start_time: str = Query(..., description='e.g. "6:00 PM" or "6pm"', examples=["6:00 PM"]),
+    end_time: str = Query(..., description='e.g. "8:00 PM". If it is at or before '
+                          'start_time, the window runs past midnight.', examples=["8:00 PM"]),
+    building: str | None = None,
+    min_capacity: int | None = None,
+    club_bookable_only: bool = False,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Rooms that are free for the whole time window.
+
+    Times are campus local time, e.g.
+    ?year=2026&month=10&day=9&start_time=6:00 PM&end_time=8:00 PM
+
+    A room is unavailable if any of these overlap the window: a 25Live event
+    (confirmed or tentative, including its setup/teardown), 25Live closed
+    hours, one of our approved requests not yet synced to 25Live, or one of
+    our RoomClosures. Rooms whose booking window hasn't opened yet are also
+    excluded. Pending requests don't block a room; they're reported in
+    `overlapping_pending_requests`.
+
+    Checks every matching room. Fast when the background refresh
+    (live25.run_refresh_loop) is running; without it, the first search for a
+    date fetches each room from 25Live and can take a while.
+    """
+    start, end = _parse_window(year, month, day, start_time, end_time)
+    rooms = await _available_rooms(
+        db, start, end,
+        lambda all_rooms: _filter_rooms(all_rooms, building, min_capacity,
+                                        club_bookable_only, include_inactive=False),
+    )
+    return [AvailableRoomResponse(**r) for r in rooms]
+
+
+# Must also come before "/{room_id}".
+@router.get("/search", response_model=list[AvailableRoomResponse])
+async def search_rooms(
+    year: int = Query(..., ge=2000, le=2100, examples=[2026]),
+    month: int = Query(..., ge=1, le=12, examples=[10]),
+    day: int = Query(..., ge=1, le=31, examples=[9]),
+    start_time: str = Query(..., description='e.g. "6:00 PM" or "6pm"', examples=["6:00 PM"]),
+    end_time: str = Query(..., description='e.g. "8:00 PM". If it is at or before '
+                          'start_time, the window runs past midnight.', examples=["8:00 PM"]),
+    attendance: int | None = Query(None, ge=1, description=(
+        "Expected headcount. Only rooms that fit are returned, smallest first.")),
+    building: str | None = None,
+    min_capacity: int | None = Query(None, ge=0),
+    max_capacity: int | None = Query(None, ge=0),
+    room_type: str | None = Query(None, description='e.g. "Meeting room"'),
+    setting: Literal["indoor", "outdoor"] | None = None,
+    food_allowed: bool | None = None,
+    crafts_allowed: bool | None = None,
+    amplified_sound_allowed: bool | None = None,
+    wheelchair_accessible: bool | None = None,
+    projector: bool | None = None,
+    whiteboard: bool | None = None,
+    sound_system: bool | None = None,
+    computers: bool | None = None,
+    piano: bool | None = None,
+    stage: bool | None = None,
+    mirrors: bool | None = None,
+    movable_furniture: bool | None = None,
+    sink: bool | None = None,
+    kitchen: bool | None = None,
+    features: list[str] = Query(default=[], description=(
+        "Any other feature tags the room must have. Repeat for several: "
+        "&features=projector&features=sink")),
+    club_bookable_only: bool = False,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Rooms that are free for the whole time window AND match the filters.
+
+    Availability works exactly like /rooms/available.
+
+    Yes/no filters: true = the room must have it, false = it must not,
+    blank = don't care. Rooms count as not having a feature unless they're
+    tagged with it, and as indoor unless tagged "outdoor". See
+    services/room_features.py for the tags and where they come from.
+    """
+    start, end = _parse_window(year, month, day, start_time, end_time)
+
+    yes_no = {
+        "food_allowed": food_allowed,
+        "crafts_allowed": crafts_allowed,
+        "amplified_sound_allowed": amplified_sound_allowed,
+        "wheelchair_accessible": wheelchair_accessible,
+        "projector": projector,
+        "whiteboard": whiteboard,
+        "sound_system": sound_system,
+        "computers": computers,
+        "piano": piano,
+        "stage": stage,
+        "mirrors": mirrors,
+        "movable_furniture": movable_furniture,
+        "sink": sink,
+        "kitchen": kitchen,
+    }
+    if attendance is not None:
+        min_capacity = max(min_capacity or 0, attendance)
+    filters = RoomFilters(
+        setting=setting,
+        yes_no={tag: v for tag, v in yes_no.items() if v is not None},
+        required_tags={room_features.normalize(t) for t in features},
+        room_type=room_type,
+        min_capacity=min_capacity,
+        max_capacity=max_capacity,
+    )
+
+    async def pick(all_rooms: list[dict]) -> list[dict]:
+        rooms = _filter_rooms(all_rooms, building, None, club_bookable_only,
+                              include_inactive=False)
+        # 25Live details (features, categories) feed the tags. They're cached
+        # by the background refresh; without it the first search fetches them.
+        details = await live25.get_space_details([r["id"] for r in rooms if r["id"].isdigit()])
+        out = []
+        for r in rooms:
+            tags = room_features.tags_for(r, details.get(r["id"]))
+            if filters.matches(r, tags):
+                out.append({**r, "features": sorted(tags)})
+        return out
+
+    rooms = await _available_rooms(db, start, end, pick)
+    if attendance is not None:
+        # Best fit first: the smallest room that holds everyone.
+        rooms.sort(key=lambda r: (r.get("capacity") or 0, r["name"]))
+    return [AvailableRoomResponse(**r) for r in rooms]
+
+
+@router.get("/features")
+async def list_features(current_user: User = Depends(get_current_user)) -> dict[str, str]:
+    """The feature tags rooms can have, with descriptions (for filter UIs)."""
+    return room_features.FEATURES
+
+
+@router.get("/{room_id}/details", response_model=RoomDetailResponse)
+async def get_room_details(
+    room_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """25Live's details for a room: equipment, categories, hours, the room's
+    rules/instructions, location, and the feature tags we derive from them."""
+    if not room_id.isdigit():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Only 25Live rooms have 25Live details.")
+    try:
+        detail = await live25.get_space_detail(room_id)
+    except live25.Live25Error as e:
+        raise _upstream_error(e)
+    if detail is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Room not found.")
+    tags = room_features.tags_for({"id": room_id, "features": []}, detail)
+    return RoomDetailResponse(**detail, tags=sorted(tags))
 
 
 @router.get("/{room_id}", response_model=RoomResponse)
@@ -263,7 +584,7 @@ async def get_room_schedule(
     is_25live_room = room_id.isdigit()
 
     async def fetch_live():
-        return await live25.get_bookings(room_id, start) if is_25live_room else []
+        return await live25.get_bookings(room_id, start, end) if is_25live_room else []
 
     try:
         live_bookings, (room, requests, waitlisted, closures) = await asyncio.gather(
