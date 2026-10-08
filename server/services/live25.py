@@ -11,6 +11,7 @@ import asyncio
 import datetime as dt
 import time
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 
@@ -18,9 +19,7 @@ BASE_URL = "https://25live.collegenet.com/25live/data/stonybrook/run"
 CACHE_TTL_SECONDS = 15 * 60
 TIMEOUT_SECONDS = 20
 
-# TODO: replace with the room-list request you capture from the 25Live
-# Locations search (DevTools -> Network). `spaces.json` is the standard 25Live
-# endpoint, but it hasn't been confirmed to work for SBU guest access yet.
+# Confirmed working for SBU guest access.
 SPACES_PATH = "/spaces.json"
 SPACES_PARAMS: dict[str, Any] = {"scope": "minimal"}
 
@@ -38,8 +37,14 @@ _cache: dict[str, tuple[float, Any]] = {}
 _locks: dict[str, asyncio.Lock] = {}
 
 
+def build_url(path: str, params: dict[str, Any]) -> str:
+    """Build the URL the same way the 25Live web app does: spaces as '+',
+    colons left as-is (e.g. start_dt=2026-10-08T00:00:00)."""
+    return f"{BASE_URL}{path}?{urlencode(params, safe=':')}" if params else BASE_URL + path
+
+
 async def _get_json(path: str, params: dict[str, Any]) -> Any:
-    key = path + "?" + "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+    url = key = build_url(path, params)
     hit = _cache.get(key)
     if hit and time.monotonic() - hit[0] < CACHE_TTL_SECONDS:
         return hit[1]
@@ -52,14 +57,13 @@ async def _get_json(path: str, params: dict[str, Any]) -> Any:
             return hit[1]
         try:
             async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS) as client:
-                r = await client.get(BASE_URL + path, params=params,
-                                     headers={"Accept": "application/json"})
+                r = await client.get(url, headers={"Accept": "application/json"})
                 r.raise_for_status()
                 data = r.json()
         except (httpx.HTTPError, ValueError) as e:
             if hit:  # 25Live is down: serve stale data rather than fail
                 return hit[1]
-            raise Live25Error(f"25Live request failed: {e}") from e
+            raise Live25Error(f"{e} (URL: {url})") from e
         _cache[key] = (time.monotonic(), data)
         return data
 
@@ -175,12 +179,16 @@ def parse_availability(data: dict) -> list[dict]:
 
 async def get_bookings(space_id: str, start: dt.date) -> list[dict]:
     """Bookings for one room, for about a month starting at `start`."""
+    # Same parameters, in the same order, as the request the 25Live web app
+    # makes. 25Live rejects the request without some of them (e.g. `caller`).
     params = {
+        "obj_cache_accl": 0,
         "start_dt": f"{start.isoformat()}T00:00:00",
         "comptype": "availability_daily",
         "compsubject": "location",
         "page_size": 100,
         "space_id": space_id,
         "include": "closed blackouts pending related empty",
+        "caller": "pro-AvailService.getData",
     }
     return parse_availability(await _get_json("/availability/availabilitydata.json", params))
