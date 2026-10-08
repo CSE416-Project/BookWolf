@@ -287,7 +287,7 @@ def parse_space_detail(data: dict) -> dict | None:
 
     names = lookups()
     attrs = {a.get("attributeId"): a.get("value") for a in s.get("attributes") or []}
-    default_layout = next((l for l in s.get("layouts") or [] if l.get("defaultLayout")),
+    default_layout = next((layout for layout in s.get("layouts") or [] if layout.get("defaultLayout")),
                           (s.get("layouts") or [None])[0]) or {}
 
     return {
