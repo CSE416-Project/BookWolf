@@ -15,9 +15,11 @@ import datetime as dt
 import inspect
 import logging
 import uuid
-from typing import Any, Callable, Literal
+from collections.abc import Callable
+from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Security, status
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
@@ -57,7 +59,9 @@ class RoomResponse(BaseModel):
     short_name: str | None = None  # 25Live's ALL-CAPS code
     capacity: int | None = None
     room_type: str | None = None
-    features: list[str] = []
+    features: list[str] = []       # our tags (in /search results: all derived tags)
+    live25_features: list[str] = []    # 25Live's names, e.g. "Food Permitted"
+    live25_categories: list[str] = []  # e.g. "Type - Meeting Room", "Campus - West"
     media_url: str | None = None
     club_bookable: bool = True
     is_active: bool = True
@@ -93,7 +97,10 @@ class RoomDetailResponse(BaseModel):
     building: str | None = None
     latitude: float | None = None
     longitude: float | None = None
-    features: list[Live25Feature] = []
+    room_type: str | None = None       # from the "Type - ..." category
+    live25_features: list[str] = []    # names, e.g. "Food Permitted"
+    live25_categories: list[str] = []  # names, e.g. "Type - Meeting Room"
+    features: list[Live25Feature] = []     # ids and quantities (e.g. 75 chairs)
     categories: list[Live25Feature] = []
     comments: str | None = None        # room notes from 25Live
     instructions: str | None = None    # setup rules, e.g. "reset the furniture"
@@ -283,16 +290,39 @@ def _upstream_error(e: Exception) -> HTTPException:
                          detail=f"Couldn't reach 25Live: {e}")
 
 
+async def _location_info() -> dict[str, dict]:
+    """25Live features/categories by room. Optional: if it fails, rooms just
+    have no 25Live features rather than the whole request failing."""
+    try:
+        return await live25.list_location_info()
+    except live25.Live25Error as e:
+        logger.warning("Couldn't load 25Live room features: %s", e)
+        return {}
+
+
 async def _merged_rooms(db: Session) -> list[dict]:
     # Fetch 25Live and query our DB at the same time.
     try:
-        live_rooms, (db_rooms, pending, waitlist) = await asyncio.gather(
+        live_rooms, info, (db_rooms, pending, waitlist) = await asyncio.gather(
             live25.list_spaces(),
+            _location_info(),
             run_in_threadpool(_room_list_data, db),
         )
     except live25.Live25Error as e:
         raise _upstream_error(e)
+    for r in live_rooms:
+        extra = info.get(r["id"])
+        if extra:
+            r["live25_features"] = extra["features"]
+            r["live25_categories"] = extra["categories"]
+            r["room_type"] = r.get("room_type") or extra["room_type"]
     return merge_rooms(live_rooms, db_rooms, pending, waitlist)
+
+
+def _live25_names(room: dict) -> dict:
+    """A room's 25Live feature/category names, in the shape tags_for() takes."""
+    return {"features": [{"name": n} for n in room.get("live25_features") or []],
+            "categories": [{"name": n} for n in room.get("live25_categories") or []]}
 
 
 def _filter_rooms(rooms: list[dict], building: str | None, min_capacity: int | None,
@@ -317,7 +347,7 @@ async def list_rooms(
     club_bookable_only: bool = False,
     include_inactive: bool = False,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Security(get_current_user, scopes=["read:rooms"]),
 ):
     """List rooms, optionally filtered by building, minimum capacity, or bookability."""
     rooms = _filter_rooms(await _merged_rooms(db), building, min_capacity,
@@ -396,7 +426,7 @@ async def list_available_rooms(
     min_capacity: int | None = None,
     club_bookable_only: bool = False,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Security(get_current_user, scopes=["read:rooms"]),
 ):
     """Rooms that are free for the whole time window.
 
@@ -458,7 +488,7 @@ async def search_rooms(
         "&features=projector&features=sink")),
     club_bookable_only: bool = False,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Security(get_current_user, scopes=["read:rooms"]),
 ):
     """Rooms that are free for the whole time window AND match the filters.
 
@@ -498,15 +528,12 @@ async def search_rooms(
         max_capacity=max_capacity,
     )
 
-    async def pick(all_rooms: list[dict]) -> list[dict]:
-        rooms = _filter_rooms(all_rooms, building, None, club_bookable_only,
-                              include_inactive=False)
-        # 25Live details (features, categories) feed the tags. They're cached
-        # by the background refresh; without it the first search fetches them.
-        details = await live25.get_space_details([r["id"] for r in rooms if r["id"].isdigit()])
+    def pick(all_rooms: list[dict]) -> list[dict]:
         out = []
-        for r in rooms:
-            tags = room_features.tags_for(r, details.get(r["id"]))
+        for r in _filter_rooms(all_rooms, building, None, club_bookable_only,
+                               include_inactive=False):
+            # Tags from 25Live's feature/category names, our DB, and the file.
+            tags = room_features.tags_for(r, _live25_names(r))
             if filters.matches(r, tags):
                 out.append({**r, "features": sorted(tags)})
         return out
@@ -518,16 +545,110 @@ async def search_rooms(
     return [AvailableRoomResponse(**r) for r in rooms]
 
 
+@router.get("/cache-status")
+async def cache_status(current_user: User = Security(get_current_user, scopes=["read:rooms"])) -> dict:
+    """Whether the 25Live cache is warm. Searches are slow until "ready" is true."""
+    return live25.cache_status()
+
+
 @router.get("/features")
-async def list_features(current_user: User = Depends(get_current_user)) -> dict[str, str]:
+async def list_features(current_user: User = Security(get_current_user, scopes=["read:rooms"])) -> dict[str, str]:
     """The feature tags rooms can have, with descriptions (for filter UIs)."""
     return room_features.FEATURES
+
+
+class BuildingOut(BaseModel):
+    name: str
+    room_count: int
+    venue_id: str | None = None        # our Venue, once its rooms are imported
+    latitude: float | None = None
+    longitude: float | None = None
+
+
+class MapRoom(BaseModel):
+    id: str
+    name: str
+    building: str | None
+    capacity: int | None
+    latitude: float | None
+    longitude: float | None
+
+
+async def _coordinates(space_ids: list[str]) -> dict[str, tuple]:
+    """(lat, lon) per room, from 25Live room details (cached for a day)."""
+    details = await live25.get_space_details(space_ids)
+    return {i: (d.get("latitude"), d.get("longitude")) for i, d in details.items()}
+
+
+@router.get("/buildings", response_model=list[BuildingOut])
+async def list_buildings(
+    include_location: bool = Query(False, description=(
+        "Add coordinates (one 25Live lookup per building the first time; cached after)")),
+    db: Session = Depends(get_db),
+    current_user: User = Security(get_current_user, scopes=["read:rooms"]),
+):
+    """Buildings with active rooms, for a building picker or a campus map."""
+    groups: dict[str, list[dict]] = {}
+    for r in await _merged_rooms(db):
+        if r["is_active"]:
+            groups.setdefault(r.get("building") or "Other locations", []).append(r)
+    coords = {}
+    if include_location:
+        firsts = {name: next((r["id"] for r in rooms if r["id"].isdigit()), None)
+                  for name, rooms in groups.items()}
+        found = await _coordinates([i for i in firsts.values() if i])
+        coords = {name: found.get(i, (None, None)) for name, i in firsts.items() if i}
+    return [BuildingOut(name=name, room_count=len(rooms),
+                        venue_id=next((r["venue_id"] for r in rooms if r.get("venue_id")), None),
+                        latitude=coords.get(name, (None, None))[0],
+                        longitude=coords.get(name, (None, None))[1])
+            for name, rooms in sorted(groups.items())]
+
+
+@router.get("/map", response_model=list[MapRoom])
+async def rooms_map(
+    building: str = Query(..., description="Building name (or part of it)"),
+    db: Session = Depends(get_db),
+    current_user: User = Security(get_current_user, scopes=["read:rooms"]),
+):
+    """Rooms in a building with their coordinates, for a map view. One
+    building at a time, since coordinates take a 25Live lookup per room
+    (cached for a day)."""
+    rooms = _filter_rooms(await _merged_rooms(db), building, None, False, False)
+    coords = await _coordinates([r["id"] for r in rooms if r["id"].isdigit()])
+    return [MapRoom(id=r["id"], name=r["name"], building=r.get("building"),
+                    capacity=r.get("capacity"),
+                    latitude=coords.get(r["id"], (None, None))[0],
+                    longitude=coords.get(r["id"], (None, None))[1]) for r in rooms]
+
+
+@router.get("/{room_id}/photo")
+async def room_photo(
+    room_id: str,
+    current_user: User = Security(get_current_user, scopes=["read:rooms"]),
+):
+    """The room's layout photo from 25Live, served through our API, so the
+    frontend can use it directly: <img src="/rooms/1810/photo">."""
+    if not room_id.isdigit():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No photo for this room.")
+    try:
+        detail = await live25.get_space_detail(room_id)
+        photo_id = (detail or {}).get("layout_photo_id")
+        if not photo_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="This room has no photo in 25Live.")
+        content, media_type = await live25.get_image(photo_id)
+    except live25.Live25Error as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail=f"Couldn't load the photo from 25Live: {e}")
+    return Response(content=content, media_type=media_type,
+                    headers={"Cache-Control": "public, max-age=86400"})
 
 
 @router.get("/{room_id}/details", response_model=RoomDetailResponse)
 async def get_room_details(
     room_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Security(get_current_user, scopes=["read:rooms"]),
 ):
     """25Live's details for a room: equipment, categories, hours, the room's
     rules/instructions, location, and the feature tags we derive from them."""
@@ -535,20 +656,27 @@ async def get_room_details(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Only 25Live rooms have 25Live details.")
     try:
-        detail = await live25.get_space_detail(room_id)
+        detail, info = await asyncio.gather(live25.get_space_detail(room_id), _location_info())
     except live25.Live25Error as e:
         raise _upstream_error(e)
     if detail is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Room not found.")
-    tags = room_features.tags_for({"id": room_id, "features": []}, detail)
-    return RoomDetailResponse(**detail, tags=sorted(tags))
+    names = info.get(room_id) or {}
+    room = {"id": room_id, "features": [],
+            "live25_features": names.get("features", []),
+            "live25_categories": names.get("categories", [])}
+    tags = room_features.tags_for(room, _live25_names(room))
+    return RoomDetailResponse(**detail, room_type=names.get("room_type"),
+                              live25_features=room["live25_features"],
+                              live25_categories=room["live25_categories"],
+                              tags=sorted(tags))
 
 
 @router.get("/{room_id}", response_model=RoomResponse)
 async def get_room(
     room_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Security(get_current_user, scopes=["read:rooms"]),
 ):
     """Get a single room's details, with pending and waitlist counts."""
     room = next((r for r in await _merged_rooms(db) if r["id"] == room_id), None)
@@ -564,7 +692,7 @@ async def get_room_schedule(
     end: dt.date | None = None,
     include_closed: bool = False,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Security(get_current_user, scopes=["read:rooms"]),
 ):
     """A room's 25Live bookings plus our requests, waitlist, and closures,
     from `start` (default today) through `end` (default a week later, max 30 days).

@@ -22,6 +22,8 @@ from routers import rooms
 from services import live25
 
 logging.basicConfig(level=logging.INFO)
+# Don't log every 25Live request; the refresh prints a summary line instead.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 @asynccontextmanager

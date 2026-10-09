@@ -40,6 +40,8 @@ def overlaps(a_start, a_end, b_start, b_end) -> bool:
 
 _ROOM_DEFAULTS = {
     "db_id": None,
+    "live25_features": [],
+    "live25_categories": [],
     "venue_id": None,
     "features": [],
     "club_bookable": True,
@@ -72,6 +74,8 @@ def merge_rooms(
             "short_name": r.get("short_name"),
             "capacity": r.get("capacity"),
             "room_type": r.get("room_type"),
+            "live25_features": r.get("live25_features") or [],
+            "live25_categories": r.get("live25_categories") or [],
             "source": "25live",
         }
 

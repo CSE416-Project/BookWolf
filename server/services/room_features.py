@@ -53,52 +53,105 @@ FEATURES: dict[str, str] = {
     "kitchen": "Kitchen access",
 }
 
+# Other ways people write a tag -> the official tag. Matching ignores case,
+# spaces vs underscores, and hyphens ("Food Permitted" -> "food_permitted").
+TAG_ALIASES: dict[str, str] = {
+    "food": "food_allowed",
+    "food_permitted": "food_allowed",
+    "food_ok": "food_allowed",
+    "food_and_drink": "food_allowed",
+    "food_and_drinks": "food_allowed",
+    "food_&_drink": "food_allowed",
+    "crafts": "crafts_allowed",
+    "crafts_permitted": "crafts_allowed",
+    "arts_and_crafts": "crafts_allowed",
+    "amplified_sound": "amplified_sound_allowed",
+    "amplified_sound_permitted": "amplified_sound_allowed",
+    "music_allowed": "amplified_sound_allowed",
+    "accessible": "wheelchair_accessible",
+    "ada": "wheelchair_accessible",
+    "ada_accessible": "wheelchair_accessible",
+    "handicap_accessible": "wheelchair_accessible",
+    "outside": "outdoor",
+    "outdoors": "outdoor",
+    "screen": "projector",
+    "tv": "projector",
+    "display": "projector",
+    "chalkboard": "whiteboard",
+    "speakers": "sound_system",
+    "microphone": "sound_system",
+    "mic": "sound_system",
+    "pa_system": "sound_system",
+    "movable_chairs": "movable_furniture",
+    "moveable_furniture": "movable_furniture",
+}
+
 FEATURES_FILE = Path(__file__).resolve().parent.parent / "data" / "room_features.json"
 
-_file_tags: dict[str, set[str]] | None = None
+_file_tags: dict[str, set[str]] = {}
+_file_mtime: float | None = None
 
 
 def _load_file_tags() -> dict[str, set[str]]:
-    """Read data/room_features.json once. Missing file means no file tags."""
-    global _file_tags
-    if _file_tags is None:
-        _file_tags = {}
-        if FEATURES_FILE.exists():
-            try:
-                raw = json.loads(FEATURES_FILE.read_text())
-                for room_id, tags in raw.items():
-                    _file_tags[str(room_id)] = {normalize(t) for t in tags}
-                    unknown = _file_tags[str(room_id)] - FEATURES.keys()
-                    if unknown:
-                        logger.warning("room_features.json: room %s has unknown tags %s",
-                                       room_id, sorted(unknown))
-            except (OSError, ValueError, AttributeError) as e:
-                logger.error("Couldn't read %s: %s", FEATURES_FILE, e)
+    """Read data/room_features.json, re-reading it whenever it changes.
+    Missing file means no file tags."""
+    global _file_tags, _file_mtime
+    try:
+        mtime = FEATURES_FILE.stat().st_mtime
+    except OSError:
+        _file_tags, _file_mtime = {}, None
+        return _file_tags
+    if mtime == _file_mtime:
+        return _file_tags
+
+    _file_mtime = mtime
+    tags_by_room: dict[str, set[str]] = {}
+    try:
+        raw = json.loads(FEATURES_FILE.read_text())
+        for room_id, tags in raw.items():
+            tags_by_room[str(room_id)] = {normalize(t) for t in tags}
+            unknown = tags_by_room[str(room_id)] - FEATURES.keys()
+            if unknown:
+                logger.warning("room_features.json: room %s has unknown tags %s "
+                               "(see FEATURES in room_features.py)", room_id, sorted(unknown))
+        logger.info("Loaded feature tags for %d rooms from %s",
+                    len(tags_by_room), FEATURES_FILE.name)
+    except (OSError, ValueError, AttributeError, TypeError) as e:
+        logger.error("Couldn't read %s: %s (keeping the previous tags)", FEATURES_FILE, e)
+        return _file_tags
+    _file_tags = tags_by_room
     return _file_tags
 
 
 def normalize(tag: str) -> str:
-    """'Food Allowed' -> 'food_allowed'."""
-    return tag.strip().lower().replace(" ", "_").replace("-", "_")
+    """'Food Allowed' -> 'food_allowed'; 'Food Permitted' -> 'food_allowed'."""
+    t = tag.strip().lower().replace("-", " ")
+    t = "_".join(t.split())
+    return TAG_ALIASES.get(t, t)
 
 
-# Tags derived from 25Live's feature and category names: if a name contains
-# any of these phrases (case-insensitive), the room gets the tag. Adjust once
-# you can see SBU's real names in data/live25_lookups.json.
+# Tags derived from 25Live's feature and category names (e.g. SBU's
+# "Food Permitted", "Blackboard", "Type - Meeting Room"): if a name contains
+# any of these phrases (case-insensitive, matched at the start of a word), the
+# room gets the tag. Check new SBU feature names against this list; see
+# GET /rooms/{id}/details for a room's real names.
 LIVE25_NAME_RULES: dict[str, list[str]] = {
-    "outdoor": ["outdoor", "outside", "lawn", "quad", "field", "plaza", "courtyard"],
+    "food_allowed": ["food permitted", "food allowed", "food & drink", "food and drink"],
+    "outdoor": ["outdoor", "outside", "lawn", "quad", "plaza", "courtyard", "type - field"],
     "projector": ["projector", "projection", "display", "screen", "monitor", "tv "],
-    "whiteboard": ["whiteboard", "white board", "chalkboard", "chalk board", "dry erase"],
-    "sound_system": ["sound system", "speaker", "microphone", "audio", "pa system"],
+    "whiteboard": ["whiteboard", "white board", "blackboard", "chalkboard", "chalk board",
+                   "dry erase"],
+    "sound_system": ["sound system", "speaker", "microphone", "pa system", "audio system"],
     "computers": ["computer", "pc ", "workstation", "laptop"],  # "pc " = whole word
     "piano": ["piano"],
     "stage": ["stage", "auditorium", "theater", "theatre"],
     "mirrors": ["mirror"],
-    "movable_furniture": ["movable", "moveable", "flexible seating", "rearrange"],
+    "movable_furniture": ["movable", "moveable", "flexible seating", "tables - loose"],
     "sink": ["sink"],
     "kitchen": ["kitchen", "catering"],
-    "wheelchair_accessible": ["accessible", "ada ", "wheelchair"],
-    "food_allowed": ["food allowed", "food permitted", "food & drink", "food and drink"],
+    # Not plain "accessible": SBU has "AV - Wireless Accessible", which is
+    # about wireless AV, not wheelchairs.
+    "wheelchair_accessible": ["wheelchair", "ada ", "ada accessible", "handicap"],
 }
 
 
@@ -154,6 +207,5 @@ class RoomFilters:
         cap = room.get("capacity")
         if self.min_capacity is not None and (cap is None or cap < self.min_capacity):
             return False
-        if self.max_capacity is not None and (cap is None or cap > self.max_capacity):
-            return False
-        return True
+        return not (self.max_capacity is not None
+                    and (cap is None or cap > self.max_capacity))
