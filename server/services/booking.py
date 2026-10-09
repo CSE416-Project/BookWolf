@@ -10,6 +10,7 @@ Times are naive campus local time throughout, matching 25Live.
 from __future__ import annotations
 
 import datetime as dt
+from types import SimpleNamespace
 
 from fastapi import HTTPException, status
 from sqlalchemy import func, or_
@@ -112,13 +113,13 @@ def _waitlist(db: Session, req: Request) -> None:
 
 # ------------------------------------------------------------------ create / edit
 
-def create_request(db: Session, *, room: Room, organization_id, requester: User,
+def create_request(db: Session, *, room: Room, organization_id, requester: User | None,
                    event_name: str, window: Window, attendance: int | None,
                    waitlisted: bool = False) -> Request:
     req = Request(
         room_id=room.id,
         organization_id=organization_id,
-        requester_id=requester.id,
+        requester_id=requester.id if requester else None,
         event_name=event_name,
         expected_attendance=attendance,
         start_time=window.start,
@@ -171,7 +172,7 @@ def update_request(db: Session, req: Request, *, event_name: str | None, window:
 
 # ------------------------------------------------------------------ decisions
 
-def approve_request(db: Session, req: Request, *, admin: User, reason: str | None) -> list[Request]:
+def approve(db: Session, req: Request, *, admin: User, reason: str | None) -> list[Request]:
     """Approve a pending request IF no approved booking overlaps its room and
     blocked time (setup to cleanup). Overlapping pending requests can no longer
     be approved, so they move to the waitlist. Returns those.
@@ -219,7 +220,7 @@ def approve_request(db: Session, req: Request, *, admin: User, reason: str | Non
     return bumped
 
 
-def deny_request(db: Session, req: Request, *, admin: User, reason: str) -> Request:
+def deny(db: Session, req: Request, *, admin: User, reason: str) -> Request:
     if req.status not in (RequestStatus.PENDING, RequestStatus.WAITLISTED):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT,
                             detail="Only pending or waitlisted requests can be denied.")
@@ -329,4 +330,54 @@ def confirm_manual_sync(db: Session, req: Request, external_ref: str) -> Request
     req.external_booking_ref = external_ref.strip()
     req.sync_status = SyncStatus.SYNCED
     db.flush()
+    return req
+
+
+# ------------------------------------------------------------------ original API
+# These keep the original booking-service functions (and their signatures)
+# working, for existing callers and tests. They run on the new logic above.
+# New code should use create_request / approve / deny directly.
+
+def _user_or_id(db: Session, user_id):
+    """The User for an id, or a stand-in carrying just the id."""
+    if user_id is None:
+        return None
+    uid = as_uuid(user_id, "user")
+    return db.get(User, uid) or SimpleNamespace(id=uid, name="", email=None)
+
+
+def submit_request(db: Session, *, room_id, organization_id, requester_id,
+                   event_name, start_time, end_time) -> Request:
+    """Original API: create a pending request (no availability check; the
+    API's POST /requests does that before calling create_request)."""
+    if end_time <= start_time:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="End time must be after start time.")
+    room = db.get(Room, as_uuid(room_id, "room"))
+    if room is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Room not found.")
+    req = create_request(db, room=room, organization_id=as_uuid(organization_id, "organization"),
+                         requester=_user_or_id(db, requester_id), event_name=event_name,
+                         window=Window(start_time, end_time), attendance=None)
+    db.commit()
+    db.refresh(req)
+    return req
+
+
+def approve_request(db: Session, *, request_id, admin_id, reason: str | None = None) -> Request:
+    """Original API: approve by id (409 if not pending or it overlaps an
+    approved booking). Overlapping pending requests move to the waitlist."""
+    req = get_request(db, request_id)
+    approve(db, req, admin=_user_or_id(db, admin_id), reason=reason)
+    db.commit()
+    db.refresh(req)
+    return req
+
+
+def deny_request(db: Session, *, request_id, admin_id, reason: str) -> Request:
+    """Original API: deny by id with a required reason."""
+    req = get_request(db, request_id)
+    deny(db, req, admin=_user_or_id(db, admin_id), reason=reason)
+    db.commit()
+    db.refresh(req)
     return req

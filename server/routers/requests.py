@@ -410,7 +410,7 @@ async def approve(
         raise _conflict(result, "This request can't be approved right now.")
 
     def decide():
-        bumped = booking.approve_request(db, req, admin=user, reason=body.reason if body else None)
+        bumped = booking.approve(db, req, admin=user, reason=body.reason if body else None)
         db.commit()
         return [str(b.id) for b in bumped], booking.sync_details(req)
 
@@ -440,7 +440,7 @@ def deny(
 ):
     """Deny a pending or waitlisted request. A reason is required (FR-5)."""
     req = booking.get_request(db, request_id)
-    booking.deny_request(db, req, admin=user, reason=body.reason)
+    booking.deny(db, req, admin=user, reason=body.reason)
     db.commit()
     db.refresh(req)
     return request_out(req)
